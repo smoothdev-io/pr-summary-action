@@ -1,0 +1,145 @@
+name: 'SmoothDev PR Summary'
+description: 'Generate AI-powered PR title and summary using SmoothDev CLI'
+author: 'SmoothDev'
+
+branding:
+  icon: 'file-text'
+  color: 'blue'
+
+inputs:
+  api_key:
+    description: 'SmoothDev API key (use secrets.SMOOTHDEV_API_KEY)'
+    required: true
+  pr_number:
+    description: 'PR number to process (defaults to current PR from context)'
+    required: false
+  generate_title:
+    description: 'Generate PR title (true/false)'
+    required: false
+    default: 'true'
+  generate_summary:
+    description: 'Generate PR summary (true/false)'
+    required: false
+    default: 'true'
+  push_to_pr:
+    description: 'Update PR with generated content (true/false)'
+    required: false
+    default: 'false'
+  use_ai_gateway:
+    description: 'Use AI Gateway instead of REST API (true/false)'
+    required: false
+    default: 'false'
+  cli_version:
+    description: 'smooth-cli version to install (default: latest)'
+    required: false
+    default: ''
+
+outputs:
+  title:
+    description: 'Generated PR title'
+    value: ${{ steps.generate.outputs.title }}
+  summary:
+    description: 'Generated PR summary'
+    value: ${{ steps.generate.outputs.summary }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install smooth-cli
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.cli_version }}" ]; then
+          pip install smooth-cli==${{ inputs.cli_version }}
+        else
+          pip install smooth-cli
+        fi
+        echo "Installed smooth-cli version:"
+        smooth --version || echo "Version command not available"
+
+    - name: Configure CLI
+      shell: bash
+      run: |
+        # Set API key via environment for this session
+        mkdir -p ~/.smoothdevio
+        cat > ~/.smoothdevio/config.json << EOF
+        {
+          "api_key": "${{ inputs.api_key }}",
+          "use_ai_gateway": ${{ inputs.use_ai_gateway }}
+        }
+        EOF
+        echo "CLI configured"
+
+    - name: Determine PR number
+      id: pr
+      shell: bash
+      run: |
+        PR_NUM="${{ inputs.pr_number }}"
+        if [ -z "$PR_NUM" ]; then
+          # Try to get from PR event context
+          PR_NUM="${{ github.event.pull_request.number }}"
+        fi
+        if [ -z "$PR_NUM" ]; then
+          echo "::error::PR number not provided and not in PR context. Use 'pr_number' input or run on pull_request event."
+          exit 1
+        fi
+        echo "number=${PR_NUM}" >> "$GITHUB_OUTPUT"
+        echo "Processing PR #${PR_NUM}"
+
+    - name: Generate PR content
+      id: generate
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SMOOTHDEV_API_KEY: ${{ inputs.api_key }}
+      run: |
+        OWNER="${{ github.repository_owner }}"
+        REPO="${{ github.event.repository.name }}"
+        PR_NUM="${{ steps.pr.outputs.number }}"
+        
+        echo "Generating content for ${OWNER}/${REPO}#${PR_NUM}"
+        
+        # Build command
+        CMD="smooth pr generate --owner ${OWNER} --repo ${REPO} --pr-number ${PR_NUM} --output json"
+        
+        if [ "${{ inputs.push_to_pr }}" == "true" ]; then
+          CMD="${CMD} --push"
+        fi
+        
+        # Run generation and capture output
+        OUTPUT_FILE="${RUNNER_TEMP}/pr_output.json"
+        
+        if ${CMD} > "${OUTPUT_FILE}" 2>&1; then
+          echo "Generation successful"
+          cat "${OUTPUT_FILE}"
+          
+          # Extract title and summary from JSON output
+          if command -v jq &> /dev/null; then
+            TITLE=$(jq -r '.title // empty' "${OUTPUT_FILE}" 2>/dev/null || echo "")
+            SUMMARY=$(jq -r '.summary // empty' "${OUTPUT_FILE}" 2>/dev/null || echo "")
+          else
+            # Fallback: try to parse with Python
+            TITLE=$(python3 -c "import json; d=json.load(open('${OUTPUT_FILE}')); print(d.get('title', ''))" 2>/dev/null || echo "")
+            SUMMARY=$(python3 -c "import json; d=json.load(open('${OUTPUT_FILE}')); print(d.get('summary', ''))" 2>/dev/null || echo "")
+          fi
+          
+          # Set outputs
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+          
+          # Handle multiline summary
+          {
+            echo "summary<<EOF"
+            echo "${SUMMARY}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          
+          echo "::notice::PR summary generated successfully"
+        else
+          echo "::error::Generation failed"
+          cat "${OUTPUT_FILE}"
+          exit 1
+        fi
