@@ -1,0 +1,16 @@
+{
+  "owner": "smoothdev-io",
+  "repo": "pr-summary-action",
+  "defaults": {
+    "owner": null,
+    "repo": null,
+    "base_branch": null,
+    "output": "text",
+    "verbose": false,
+    "auto_commit": false
+  },
+  "release": {
+    "tag_prefix": "v",
+    "include_prerelease": false
+  }
+}
